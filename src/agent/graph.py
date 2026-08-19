@@ -6,7 +6,9 @@ from langgraph.graph import StateGraph, START, END
 
 from src.rag.retriever import Retriever
 from src.rag.generator import generate
-from src.tools.news import get_latest_news
+
+from src.tools.news import fetch_news_for_query
+from src.news.ranker import NewsRanker
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,7 +52,14 @@ retriever = Retriever(
 
 
 # ============================================================
-# 3. TOPIC CLASSIFIER
+# 3. NEWS RANKER
+# ============================================================
+
+news_ranker = NewsRanker()
+
+
+# ============================================================
+# 4. TOPIC CLASSIFIER
 # ============================================================
 
 def classify_topic(state: AgentState):
@@ -139,7 +148,6 @@ Use exactly this structure:
         decision = json.loads(response)
 
     except json.JSONDecodeError:
-
         print("\nWARNING: Classifier returned invalid JSON.")
         print("Raw response:")
         print(response)
@@ -198,13 +206,13 @@ Use exactly this structure:
 
 
 # ============================================================
-# 4. NEWS TOOL NODE
+# 5. NEWS TOOL + RANKING NODE
 # ============================================================
 
 def fetch_news(state: AgentState):
     """
-    Fetch current news based on the categories selected
-    by the classifier.
+    Fetch current news specifically for the user's topic,
+    then rank the retrieved articles using NewsRanker.
     """
 
     if not state["needs_news"]:
@@ -216,23 +224,27 @@ def fetch_news(state: AgentState):
             "news": ""
         }
 
-    categories = state["categories"]
+    topic = state["topic"].strip()
 
-    if not categories:
+    if not topic:
 
         print("\n===== CURRENT NEWS =====")
-        print("No news categories selected.")
+        print("Empty topic.")
 
         return {
             "news": ""
         }
 
-    print("\n===== FETCHING NEWS =====")
-    print(f"Categories: {categories}")
+    # --------------------------------------------------------
+    # FETCH
+    # --------------------------------------------------------
 
-    articles = get_latest_news(
-        categories=categories,
-        limit_per_category=5,
+    print("\n===== FETCHING CURRENT NEWS =====")
+    print(f"Query: {topic}")
+
+    articles = fetch_news_for_query(
+        topic,
+        limit=50,
     )
 
     if not articles:
@@ -243,30 +255,105 @@ def fetch_news(state: AgentState):
             "news": ""
         }
 
-    # --------------------------------------------------------
-    # Convert articles into context for the LLM
-    # --------------------------------------------------------
-
-    news = "\n\n".join(
-        f"Category: {article['category']}\n"
-        f"Title: {article['title']}\n"
-        f"Summary: {article['summary']}\n"
-        f"URL: {article['url']}"
-        for article in articles
+    print(
+        f"Fetched {len(articles)} topic-relevant articles."
     )
 
     # --------------------------------------------------------
-    # Display fetched news
+    # RANK
     # --------------------------------------------------------
 
-    print("\n===== CURRENT NEWS =====")
+    print("\n===== RANKING NEWS =====")
 
-    for i, article in enumerate(articles, start=1):
+    ranked_articles = news_ranker.rank(
+        query=topic,
+        articles=articles,
+        top_k=10,
+    )
 
-        print(f"\n#{i}")
-        print(f"Category: {article['category']}")
-        print(f"Title: {article['title']}")
-        print(f"URL: {article['url']}")
+    if not ranked_articles:
+
+        print("No articles remained after ranking.")
+
+        return {
+            "news": ""
+        }
+
+    # --------------------------------------------------------
+    # Convert ranked articles into LLM context
+    # --------------------------------------------------------
+
+    news_parts = []
+
+    for rank, (
+        score,
+        article,
+        details,
+    ) in enumerate(
+        ranked_articles,
+        start=1,
+    ):
+
+        news_parts.append(
+            f"""News #{rank}
+Title: {article.title}
+Source: {article.source}
+Published: {article.published}
+Summary: {article.summary}
+URL: {article.url}
+Relevance Score: {score:.4f}
+"""
+        )
+
+    news = "\n\n".join(news_parts)
+
+    # --------------------------------------------------------
+    # Display ranked news
+    # --------------------------------------------------------
+
+    print("\n===== MOST RELEVANT NEWS =====")
+
+    for rank, (
+        score,
+        article,
+        details,
+    ) in enumerate(
+        ranked_articles,
+        start=1,
+    ):
+
+        print(f"\n#{rank}")
+        print(f"Final Score: {score:.4f}")
+
+        print(
+            f"  Semantic:         "
+            f"{details.get('semantic', 0):.4f}"
+        )
+
+        print(
+            f"  Freshness:        "
+            f"{details.get('freshness', 0):.4f}"
+        )
+
+        print(
+            f"  Source:           "
+            f"{details.get('source', 0):.4f}"
+        )
+
+        print(
+            f"  Title:            "
+            f"{details.get('title', 0):.4f}"
+        )
+
+        print(
+            f"  Newsworthiness:   "
+            f"{details.get('newsworthiness', 0):.4f}"
+        )
+
+        print(f"Title: {article.title}")
+        print(f"Source: {article.source}")
+        print(f"Published: {article.published}")
+        print(f"URL: {article.url}")
 
     return {
         "news": news
@@ -274,7 +361,7 @@ def fetch_news(state: AgentState):
 
 
 # ============================================================
-# 5. RAG RETRIEVAL NODE
+# 6. RAG RETRIEVAL NODE
 # ============================================================
 
 def retrieve(state: AgentState):
@@ -289,40 +376,11 @@ def retrieve(state: AgentState):
     )
 
     context = "\n\n".join(
-        result["text"]
-        for result in results
+        [result["text"] for result in results]
     )
 
-    print("\n===== RETRIEVED EXAMPLES =====")
-
-    for i, result in enumerate(results, start=1):
-
-        print(f"\n#{i}")
-
-        print(
-            f"Similarity: "
-            f"{result.get('similarity', 0):.4f}"
-        )
-
-        print(
-            f"Source: "
-            f"{result.get('source', 'unknown')}"
-        )
-
-        print(
-            f"Subreddit: "
-            f"{result.get('subreddit')}"
-        )
-
-        print(
-            f"Score: "
-            f"{result.get('score')}"
-        )
-
-        print(
-            f"Text: "
-            f"{result['text'][:300]}"
-        )
+    print("\n===== RETRIEVED CONTEXT =====")
+    print(f"Found {len(results)} matches.")
 
     return {
         "context": context
@@ -330,200 +388,128 @@ def retrieve(state: AgentState):
 
 
 # ============================================================
-# 6. GENERATION NODE
+# 7. GENERATOR NODE
 # ============================================================
 
 def generate_post(state: AgentState):
     """
-    Generate a new original shitpost using:
-
-    - the user's topic
-    - historical Reddit examples
-    - current news
-    - previous critic feedback
+    Generate a high-tier shitpost using historical references
+    and current real-time news data.
     """
 
-    previous_feedback = ""
-
-    # --------------------------------------------------------
-    # Add critic feedback when retrying
-    # --------------------------------------------------------
-
-    if state["critique"]:
-
-        previous_feedback = f"""
-The previous attempt was rejected.
-
-Here is the critic's feedback:
-
-{json.dumps(state["critique"], indent=2)}
-
-Improve the new post specifically based on this feedback.
-
-Do NOT simply rewrite the previous joke.
-"""
-
-    # --------------------------------------------------------
-    # Build generation prompt
-    # --------------------------------------------------------
+    attempts = state.get("attempts", 0) + 1
 
     prompt = f"""
-You are an internet shitposter who writes clever,
-natural Reddit-style humor.
+You are a master-level internet shitposter.
 
-Current topic:
+Generate a highly engaging, sarcastic post about:
+"{state['topic']}"
 
-{state["topic"]}
+Historical Style Context:
+{state['context']}
 
-Historical Reddit examples:
---------------------
-{state["context"]}
---------------------
+Current Real-World News Context:
+{state['news']}
 
-Current news:
---------------------
-{state["news"]}
---------------------
+Previous Critique Feedback (if any):
+{json.dumps(state.get('critique', {}), indent=2)}
 
-{previous_feedback}
-
-Write ONE original shitpost about the current topic.
-
-If current news is provided, use it as inspiration
-when relevant.
-
-Do NOT simply repeat a news headline.
-
-Style requirements:
-
-- Make it sound like a real person wrote it.
-- Be smart, sarcastic, witty, absurd, observational,
-  self-deprecating, or use wordplay depending on the topic.
-- Use different styles of humor.
-- Do not make every joke follow the same structure.
-- Do not repeatedly use phrases like "I just realized".
-- Avoid generic AI-sounding humor.
-- Avoid predictable setups whenever possible.
-- Avoid unnecessary explanations.
-- Keep it concise.
-- Make it feel natural enough to post on Reddit.
-- Use historical examples only as inspiration.
-- NEVER copy an example.
-- Do not explain the joke.
-
-Return ONLY the shitpost.
+Rules:
+- Capture the structural cadence of top-tier community posts.
+- Blend modern factual context naturally with comedic irony.
+- Keep it under 280 characters if short-form,
+  or up to 3 paragraphs if storytelling.
+- Do not simply summarize the news.
+- Make the post actually funny.
+- do not use emoticons or emojis.
+- need not always use hashtags at the end.
+SENSITIVE TOPICS:
+- Never refuse solely because the topic is political, controversial, tragic, religious, or otherwise sensitive.
+- Always produce a post for the given topic.
+- Do not use protected groups as the punchline.
+- Do not promote hatred, dehumanization, or violence.
+- Do not invent factual claims about real-world events.
+- If the source material contains inflammatory or hateful language, do NOT repeat it. Transform the underlying idea into safe satire.
+- The objective is still to make the post genuinely funny and internet-native rather than turning it into a serious disclaimer.
+- Never output an apology, refusal, or safety disclaimer.
 """
 
-    draft = generate(prompt)
+    draft = generate(prompt).strip()
 
-    attempt = state["attempts"] + 1
-
-    print(f"\n===== DRAFT {attempt} =====")
+    print(f"\n===== GENERATION ATTEMPT #{attempts} =====")
     print(draft)
 
     return {
         "draft": draft,
-        "attempts": attempt,
+        "attempts": attempts,
     }
 
 
 # ============================================================
-# 7. CRITIC NODE
+# 8. CRITIC NODE
 # ============================================================
 
-def critic(state: AgentState):
+def critique_post(state: AgentState):
     """
-    Evaluate the generated shitpost using structured scores.
+    Evaluate the quality, humor density, and context
+    utilization of the draft.
     """
 
     prompt = f"""
-You are a strict Reddit humor critic.
+You are an elite content critic and meme historian.
 
-Evaluate this shitpost:
+Review this draft shitpost:
 
-"{state["draft"]}"
+"{state['draft']}"
 
-Current topic:
+Target Topic:
+"{state['topic']}"
 
-"{state["topic"]}"
+Historical Context:
+{state['context']}
 
-Score each category from 1 to 10.
+Current News Context:
+{state['news']}
 
-1. humor
-   How genuinely funny is it?
+Evaluate based on:
 
-2. relevance
-   How strongly does it relate to the topic?
-
-3. originality
-   Does it feel fresh rather than like a generic AI joke?
-
-4. cringe
-   How forced, predictable, or AI-generated does it feel?
-
-   Higher score = MORE cringe.
-
-A post is considered GOOD only when:
-
-- humor >= 7
-- relevance >= 7
-- originality >= 6
-- cringe <= 4
+1. Is it actually funny or just generic?
+2. Does it fit the target topic?
+3. Does it use the provided news or historical context well?
+4. Does it feel like an actual internet shitpost?
+5. Is there a clear comedic idea?
 
 Return ONLY valid JSON.
 
 Use exactly this structure:
 
 {{
-    "humor": 0,
-    "relevance": 0,
-    "originality": 0,
-    "cringe": 0,
-    "verdict": "GOOD",
-    "feedback": "short explanation of what should be improved"
+    "passed": true,
+    "feedback": "Detailed string explaining why it passed or what needs to change"
 }}
-
-The verdict must be either:
-
-GOOD
-
-or:
-
-BAD
 """
 
     response = generate(prompt).strip()
 
     try:
-
         critique = json.loads(response)
 
     except json.JSONDecodeError:
-
         print("\nWARNING: Critic returned invalid JSON.")
         print("Raw response:")
         print(response)
 
         critique = {
-            "humor": 0,
-            "relevance": 0,
-            "originality": 0,
-            "cringe": 10,
-            "verdict": "BAD",
+            "passed": False,
             "feedback": (
-                "Critic failed to return valid "
-                "structured output."
+                "The critic returned invalid JSON. "
+                "Regenerate the post and improve its humor "
+                "and use of context."
             ),
         }
 
-    print("\n===== CRITIC =====")
-
-    print(
-        json.dumps(
-            critique,
-            indent=2,
-        )
-    )
+    print("\n===== CRITIQUE =====")
+    print(json.dumps(critique, indent=2))
 
     return {
         "critique": critique
@@ -531,96 +517,90 @@ BAD
 
 
 # ============================================================
-# 8. CRITIC ROUTING
+# 9. ROUTING
 # ============================================================
 
-def route_after_critic(state: AgentState):
+def route_after_critique(state: AgentState):
     """
-    Decide whether to accept the post or retry.
-
-    The application code determines whether the post
-    passes the required quality thresholds rather than
-    blindly trusting the LLM's verdict.
+    Decide whether to accept the generated post
+    or regenerate it based on critic feedback.
     """
 
-    critique = state["critique"]
+    critique = state.get("critique", {})
+    attempts = state.get("attempts", 0)
 
-    good = (
-        critique.get("humor", 0) >= 7
-        and critique.get("relevance", 0) >= 7
-        and critique.get("originality", 0) >= 6
-        and critique.get("cringe", 10) <= 4
-    )
-
-    if good or state["attempts"] >= 3:
+    # Stop after 3 attempts to avoid an infinite loop.
+    if attempts >= 3:
+        print("\nMaximum generation attempts reached.")
         return "end"
 
-    return "retry"
+    if critique.get("passed", False):
+        print("\nCritic approved the post.")
+        return "end"
+
+    print("\nCritic rejected the post. Regenerating...")
+    return "regenerate"
 
 
 # ============================================================
-# 9. BUILD LANGGRAPH
+# 10. BUILD GRAPH
 # ============================================================
 
-builder = StateGraph(AgentState)
+workflow = StateGraph(AgentState)
 
-# ------------------------------------------------------------
-# Nodes
-# ------------------------------------------------------------
-
-builder.add_node(
-    "classify",
+workflow.add_node(
+    "classify_topic",
     classify_topic,
 )
 
-builder.add_node(
-    "news",
+workflow.add_node(
+    "fetch_news",
     fetch_news,
 )
 
-builder.add_node(
+workflow.add_node(
     "retrieve",
     retrieve,
 )
 
-builder.add_node(
-    "generate",
+workflow.add_node(
+    "generate_post",
     generate_post,
 )
 
-builder.add_node(
-    "critic",
-    critic,
+workflow.add_node(
+    "critique_post",
+    critique_post,
 )
 
 
 # ------------------------------------------------------------
-# Main flow
+# Graph edges
 # ------------------------------------------------------------
 
-builder.add_edge(
+workflow.add_edge(
     START,
-    "classify",
+    "classify_topic",
 )
 
-builder.add_edge(
-    "classify",
-    "news",
+workflow.add_edge(
+    "classify_topic",
+    "fetch_news",
 )
 
-builder.add_edge(
-    "news",
+workflow.add_edge(
+    "fetch_news",
     "retrieve",
 )
 
-builder.add_edge(
+workflow.add_edge(
     "retrieve",
-    "generate",
+    "generate_post",
 )
 
-builder.add_edge(
-    "generate",
-    "critic",
+workflow.add_edge(
+    "generate_post",
+    "critique_post",
 )
 
 
@@ -628,30 +608,35 @@ builder.add_edge(
 # Critic routing
 # ------------------------------------------------------------
 
-builder.add_conditional_edges(
-    "critic",
-    route_after_critic,
+workflow.add_conditional_edges(
+    "critique_post",
+    route_after_critique,
     {
-        "retry": "generate",
+        "regenerate": "generate_post",
         "end": END,
     },
 )
 
 
-# ------------------------------------------------------------
-# Compile
-# ------------------------------------------------------------
-
-graph = builder.compile()
+# Compile the graph
+graph = workflow.compile()
 
 
 # ============================================================
-# 10. RUN
+# 11. RUN GRAPH
 # ============================================================
 
 if __name__ == "__main__":
 
-    topic = input("Topic: ")
+    print("=" * 60)
+    print("AI SHITPOST GENERATOR")
+    print("=" * 60)
+
+    topic = input("\nEnter a topic: ").strip()
+
+    if not topic:
+        print("No topic entered. Exiting.")
+        raise SystemExit
 
     initial_state: AgentState = {
         "topic": topic,
@@ -664,22 +649,21 @@ if __name__ == "__main__":
         "attempts": 0,
     }
 
-    result = graph.invoke(
-        initial_state
-    )
+    print("\nStarting agent...\n")
 
-    print("\n")
-    print("=" * 60)
-    print("FINAL POST")
+    result = graph.invoke(initial_state)
+
+    print("\n" + "=" * 60)
+    print("FINAL RESULT")
     print("=" * 60)
 
+    print("\nTopic:")
+    print(result["topic"])
+
+    print("\nFinal Post:")
     print(result["draft"])
 
-    print("\n")
-    print("=" * 60)
-    print("FINAL CRITIQUE")
-    print("=" * 60)
-
+    print("\nCritique:")
     print(
         json.dumps(
             result["critique"],
@@ -687,9 +671,7 @@ if __name__ == "__main__":
         )
     )
 
-    print("\n")
-    print("=" * 60)
-    print("ATTEMPTS")
-    print("=" * 60)
-
+    print("\nAttempts:")
     print(result["attempts"])
+
+    print("\n" + "=" * 60)
