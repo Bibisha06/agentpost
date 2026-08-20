@@ -20,9 +20,6 @@ def main():
 
     metadata = []
 
-    # IMPORTANT:
-    # This order MUST match the order used when embeddings
-    # were generated.
 
     for _, row in comments.iterrows():
         metadata.append({

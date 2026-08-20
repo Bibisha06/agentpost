@@ -73,7 +73,7 @@ You are a topic classification agent.
 
 The user wants to create a shitpost about:
 
-"{state["topic"]}"
+"{state['topic']}"
 
 Your job is to determine:
 
@@ -157,10 +157,6 @@ Use exactly this structure:
             "categories": [],
         }
 
-    # --------------------------------------------------------
-    # Validate categories
-    # --------------------------------------------------------
-
     allowed_categories = {
         "tech",
         "gaming",
@@ -183,7 +179,6 @@ Use exactly this structure:
         decision.get("needs_news", False)
     )
 
-    # If no valid categories exist, news isn't useful.
     if not categories:
         needs_news = False
 
@@ -280,7 +275,7 @@ def fetch_news(state: AgentState):
         }
 
     # --------------------------------------------------------
-    # Convert ranked articles into LLM context
+    # Convert ranked news into LLM context
     # --------------------------------------------------------
 
     news_parts = []
@@ -393,50 +388,100 @@ def retrieve(state: AgentState):
 
 def generate_post(state: AgentState):
     """
-    Generate a high-tier shitpost using historical references
-    and current real-time news data.
+    Generate a shitpost using:
+    - historical Reddit examples
+    - current news
+    - previous critic feedback
     """
 
     attempts = state.get("attempts", 0) + 1
 
-    prompt = f"""
-You are a master-level internet shitposter.
+    print(
+        f"\n===== GENERATION ATTEMPT #{attempts} ====="
+    )
 
-Generate a highly engaging, sarcastic post about:
+    previous_critique = state.get("critique", {})
+
+    prompt = f"""
+You are an expert internet shitposter.
+
+Create ONE genuinely funny, internet-native shitpost about:
+
 "{state['topic']}"
 
-Historical Style Context:
+============================================================
+HISTORICAL REDDIT STYLE CONTEXT
+============================================================
+
 {state['context']}
 
-Current Real-World News Context:
+============================================================
+CURRENT NEWS CONTEXT
+============================================================
+
 {state['news']}
 
-Previous Critique Feedback (if any):
-{json.dumps(state.get('critique', {}), indent=2)}
+============================================================
+PREVIOUS CRITIC FEEDBACK
+============================================================
 
-Rules:
-- Capture the structural cadence of top-tier community posts.
-- Blend modern factual context naturally with comedic irony.
-- Keep it under 280 characters if short-form,
-  or up to 3 paragraphs if storytelling.
-- Do not simply summarize the news.
-- Make the post actually funny.
-- do not use emoticons or emojis.
-- need not always use hashtags at the end.
-SENSITIVE TOPICS:
-- Never refuse solely because the topic is political, controversial, tragic, religious, or otherwise sensitive.
+{json.dumps(previous_critique, indent=2)}
+
+============================================================
+OBJECTIVE
+============================================================
+
+Create a post that feels like something an actual person
+would post on Reddit.
+
+The post should have:
+
+- One clear comedic premise.
+- A strong punchline or payoff.
+- Natural internet/shitpost language.
+- Humor rather than generic observations.
+- Strong relevance to the requested topic.
+- Original wording.
+- A concise structure.
+- No unnecessary explanations.
+
+If current news is provided, use it only when it
+actually improves the joke.
+
+Do NOT simply summarize the news.
+
+If previous critic feedback exists, actively fix the
+specific problems identified by the critic.
+
+============================================================
+IMPORTANT
+============================================================
+
+Sensitive topics:
+
+- Never refuse solely because the topic is political,
+  controversial, tragic, religious, or otherwise sensitive.
 - Always produce a post for the given topic.
 - Do not use protected groups as the punchline.
 - Do not promote hatred, dehumanization, or violence.
 - Do not invent factual claims about real-world events.
-- If the source material contains inflammatory or hateful language, do NOT repeat it. Transform the underlying idea into safe satire.
-- The objective is still to make the post genuinely funny and internet-native rather than turning it into a serious disclaimer.
-- Never output an apology, refusal, or safety disclaimer.
+- If source material contains inflammatory or hateful
+  language, transform the underlying idea into safe satire.
+- Never output an apology.
+- Never output a refusal.
+- Never output a safety disclaimer.
+- Do not use emojis or emoticons.
+- Do not add hashtags unless they are genuinely part
+  of the joke.
+
+Return ONLY the final post text.
+
+Do not explain your reasoning.
+Do not label it "Post:".
 """
 
     draft = generate(prompt).strip()
 
-    print(f"\n===== GENERATION ATTEMPT #{attempts} =====")
     print(draft)
 
     return {
@@ -451,41 +496,98 @@ SENSITIVE TOPICS:
 
 def critique_post(state: AgentState):
     """
-    Evaluate the quality, humor density, and context
-    utilization of the draft.
+    Evaluate the generated post.
+
+    The critic is intentionally strict so that weak,
+    generic posts are regenerated.
     """
 
+    print("\n===== CRITIQUE =====")
+
     prompt = f"""
-You are an elite content critic and meme historian.
+You are an extremely strict Reddit shitpost critic.
 
-Review this draft shitpost:
+Evaluate the following generated post:
 
-"{state['draft']}"
+------------------------------------------------------------
+DRAFT
+------------------------------------------------------------
 
-Target Topic:
-"{state['topic']}"
+{state['draft']}
 
-Historical Context:
+------------------------------------------------------------
+TARGET TOPIC
+------------------------------------------------------------
+
+{state['topic']}
+
+------------------------------------------------------------
+HISTORICAL CONTEXT
+------------------------------------------------------------
+
 {state['context']}
 
-Current News Context:
+------------------------------------------------------------
+CURRENT NEWS
+------------------------------------------------------------
+
 {state['news']}
 
-Evaluate based on:
+------------------------------------------------------------
+EVALUATION
+------------------------------------------------------------
 
-1. Is it actually funny or just generic?
-2. Does it fit the target topic?
-3. Does it use the provided news or historical context well?
-4. Does it feel like an actual internet shitpost?
-5. Is there a clear comedic idea?
+Judge the post on:
+
+1. Humor
+   - Is it actually funny?
+   - Does it have a real punchline?
+   - Is it more than a generic observation?
+
+2. Topic relevance
+   - Is the joke clearly about the requested topic?
+
+3. Comedic premise
+   - Is there ONE identifiable central joke?
+   - Does the post build toward a payoff?
+
+4. Internet authenticity
+   - Does it sound like an actual Reddit shitpost?
+   - Does it avoid sounding like an AI-generated essay?
+
+5. Context usage
+   - If useful news exists, did the post use it naturally?
+   - If the news is irrelevant to the joke, do not penalize
+     the post for not forcing it into the joke.
+
+6. Originality
+   - Does it avoid tired generic jokes?
+   - Does it contain a fresh angle?
+
+7. Conciseness
+   - Is every line contributing to the joke?
+   - Remove unnecessary filler and unrelated jokes.
+
+============================================================
+PASS CRITERIA
+============================================================
+
+Return "passed": true ONLY if the post is genuinely
+good enough to publish.
+
+Do NOT pass a weak post merely because it is grammatically
+correct or technically related to the topic.
+
+If the post is generic, predictable, incoherent,
+overwritten, or lacks a punchline, reject it.
 
 Return ONLY valid JSON.
 
-Use exactly this structure:
+Use exactly:
 
 {{
     "passed": true,
-    "feedback": "Detailed string explaining why it passed or what needs to change"
+    "feedback": "Short but specific explanation."
 }}
 """
 
@@ -495,6 +597,7 @@ Use exactly this structure:
         critique = json.loads(response)
 
     except json.JSONDecodeError:
+
         print("\nWARNING: Critic returned invalid JSON.")
         print("Raw response:")
         print(response)
@@ -502,14 +605,17 @@ Use exactly this structure:
         critique = {
             "passed": False,
             "feedback": (
-                "The critic returned invalid JSON. "
-                "Regenerate the post and improve its humor "
-                "and use of context."
+                "Critic returned invalid JSON. "
+                "Generate a substantially better post."
             ),
         }
 
-    print("\n===== CRITIQUE =====")
-    print(json.dumps(critique, indent=2))
+    print(
+        json.dumps(
+            critique,
+            indent=2,
+        )
+    )
 
     return {
         "critique": critique
@@ -517,28 +623,52 @@ Use exactly this structure:
 
 
 # ============================================================
-# 9. ROUTING
+# 9. ROUTING AFTER CRITIC
 # ============================================================
 
 def route_after_critique(state: AgentState):
     """
-    Decide whether to accept the generated post
-    or regenerate it based on critic feedback.
+    If the critic approves the post, finish.
+
+    If the critic rejects it, regenerate.
+
+    Maximum of 3 generation attempts.
     """
 
     critique = state.get("critique", {})
     attempts = state.get("attempts", 0)
 
-    # Stop after 3 attempts to avoid an infinite loop.
-    if attempts >= 3:
-        print("\nMaximum generation attempts reached.")
-        return "end"
+    # --------------------------------------------------------
+    # Approved
+    # --------------------------------------------------------
 
     if critique.get("passed", False):
+
         print("\nCritic approved the post.")
+
         return "end"
 
-    print("\nCritic rejected the post. Regenerating...")
+    # --------------------------------------------------------
+    # Maximum attempts reached
+    # --------------------------------------------------------
+
+    if attempts >= 3:
+
+        print(
+            "\nMaximum generation attempts reached."
+        )
+
+        return "end"
+
+    # --------------------------------------------------------
+    # Regenerate
+    # --------------------------------------------------------
+
+    print(
+        "\nCritic rejected the post. "
+        "Regenerating..."
+    )
+
     return "regenerate"
 
 
@@ -547,6 +677,11 @@ def route_after_critique(state: AgentState):
 # ============================================================
 
 workflow = StateGraph(AgentState)
+
+
+# ------------------------------------------------------------
+# Nodes
+# ------------------------------------------------------------
 
 workflow.add_node(
     "classify_topic",
@@ -575,7 +710,7 @@ workflow.add_node(
 
 
 # ------------------------------------------------------------
-# Graph edges
+# Initial flow
 # ------------------------------------------------------------
 
 workflow.add_edge(
@@ -618,25 +753,27 @@ workflow.add_conditional_edges(
 )
 
 
-# Compile the graph
-graph = workflow.compile()
+# ------------------------------------------------------------
+# Compile
+# ------------------------------------------------------------
+
+app = workflow.compile()
 
 
 # ============================================================
-# 11. RUN GRAPH
+# 11. GENERATE SHITPOST FUNCTION
 # ============================================================
 
-if __name__ == "__main__":
+def generate_shitpost(topic: str) -> dict:
+    """
+    Run the LangGraph pipeline for a given topic.
+    This function is used by both the CLI and FastAPI.
+    """
 
-    print("=" * 60)
-    print("AI SHITPOST GENERATOR")
-    print("=" * 60)
-
-    topic = input("\nEnter a topic: ").strip()
+    topic = topic.strip()
 
     if not topic:
-        print("No topic entered. Exiting.")
-        raise SystemExit
+        raise ValueError("Topic cannot be empty")
 
     initial_state: AgentState = {
         "topic": topic,
@@ -649,9 +786,36 @@ if __name__ == "__main__":
         "attempts": 0,
     }
 
-    print("\nStarting agent...\n")
+    print("\nStarting agent...")
+    print(f"Topic: {topic}")
 
-    result = graph.invoke(initial_state)
+    final_state = app.invoke(initial_state)
+
+    return {
+        "topic": final_state["topic"],
+        "draft": final_state["draft"],
+        "critique": final_state["critique"],
+        "attempts": final_state["attempts"],
+    }
+
+
+# ============================================================
+# 12. CLI ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    print("=" * 60)
+    print("AI SHITPOST GENERATOR")
+    print("=" * 60)
+
+    topic = input("\nEnter a topic: ").strip()
+
+    if not topic:
+        print("\nNo topic entered. Exiting.")
+        raise SystemExit(1)
+
+    result = generate_shitpost(topic)
 
     print("\n" + "=" * 60)
     print("FINAL RESULT")
